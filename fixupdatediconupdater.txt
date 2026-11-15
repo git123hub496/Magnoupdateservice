@@ -1,0 +1,67 @@
+sudo python3 -c '
+import os
+from PyQt5.QtGui import QImage, QPainter, QColor, QPen, QBrush, QConicalGradient, QPolygonF, QFont
+from PyQt5.QtCore import Qt, QRectF, QPointF
+
+size = 256
+img = QImage(size, size, QImage.Format_ARGB32)
+img.fill(Qt.transparent)
+
+p = QPainter(img)
+p.setRenderHint(QPainter.Antialiasing)
+p.setRenderHint(QPainter.SmoothPixmapTransform)
+
+# 1. Dark circular background
+p.setBrush(QBrush(QColor(18, 20, 26, 248)))
+p.setPen(Qt.NoPen)
+p.drawEllipse(QRectF(10, 10, size - 20, size - 20))
+
+# 2. Thick glowing MagnoOS orange outer ring
+grad = QConicalGradient(size / 2.0, size / 2.0, 45)
+grad.setColorAt(0.0, QColor(255, 95, 20))
+grad.setColorAt(0.5, QColor(255, 185, 80))
+grad.setColorAt(1.0, QColor(255, 95, 20))
+p.setPen(QPen(QBrush(grad), 16, Qt.SolidLine, Qt.RoundCap))
+p.setBrush(Qt.NoBrush)
+p.drawEllipse(QRectF(16, 16, size - 32, size - 32))
+
+# 3. Load /icon.png directly via QImage and draw it centered
+src = "/icon.png" if os.path.exists("/icon.png") else "/etc/magno-grid/icon.png"
+logo = QImage(src)
+if not logo.isNull():
+    scaled = logo.scaled(148, 148, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    p.drawImage((size - scaled.width()) // 2, (size - scaled.height()) // 2 - 8, scaled)
+else:
+    print("WARNING: Could not load", src)
+
+# 4. Sleek orange "UPDATE" pill banner across the bottom
+pill_rect = QRectF(36, 186, size - 72, 48)
+p.setPen(QPen(QColor(18, 20, 26), 5))
+p.setBrush(QBrush(QColor(255, 110, 30)))
+p.drawRoundedRect(pill_rect, 24, 24)
+
+font = QFont("Sans", 18, QFont.Bold)
+p.setFont(font)
+p.setPen(QColor(255, 255, 255))
+p.drawText(pill_rect, Qt.AlignCenter, "UPDATE")
+
+p.end()
+os.makedirs("/etc/magno-grid", exist_ok=True)
+out_path = "/etc/magno-grid/updater-icon.png"
+img.save(out_path, "PNG")
+os.chmod(out_path, 0o644)
+print("Saved custom icon:", out_path, "size:", os.path.getsize(out_path), "bytes")
+'
+
+cat << 'EOF' > ~/.local/share/applications/magno-updater.desktop
+[Desktop Entry]
+Name=Magno Updater
+Comment=MagnoOS System Updater & Cleaner
+Exec=/usr/local/bin/magno-updater
+Icon=/etc/magno-grid/updater-icon.png
+Terminal=false
+Type=Application
+Categories=System;
+EOF
+
+update-desktop-database ~/.local/share/applications/
