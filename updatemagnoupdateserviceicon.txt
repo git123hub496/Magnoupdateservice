@@ -1,0 +1,67 @@
+sudo python3 -c '
+import os, math
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QImage, QPainter, QColor, QPen, QBrush, QPixmap, QConicalGradient, QPainterPath, QPolygonF
+from PyQt5.QtCore import Qt, QRectF, QPointF
+
+app = QApplication([])
+size = 256
+img = QImage(size, size, QImage.Format_ARGB32)
+img.fill(Qt.transparent)
+
+p = QPainter(img)
+p.setRenderHint(QPainter.Antialiasing)
+p.setRenderHint(QPainter.SmoothPixmapTransform)
+
+# 1. Dark frosted circular backing
+p.setBrush(QBrush(QColor(20, 22, 28, 240)))
+p.setPen(Qt.NoPen)
+p.drawEllipse(QRectF(14, 14, size - 28, size - 28))
+
+# 2. Glowing MagnoOS orange update ring around the outside
+grad = QConicalGradient(size / 2.0, size / 2.0, 45)
+grad.setColorAt(0.0, QColor(255, 106, 26))
+grad.setColorAt(0.5, QColor(255, 175, 85))
+grad.setColorAt(1.0, QColor(255, 106, 26))
+
+ring_pen = QPen(QBrush(grad), 14, Qt.SolidLine, Qt.RoundCap)
+p.setPen(ring_pen)
+p.setBrush(Qt.NoBrush)
+p.drawArc(QRectF(18, 18, size - 36, size - 36), 30 * 16, 300 * 16)
+
+# 3. Draw your MagnoOS icon.png centered inside the ring
+src = "/icon.png" if os.path.exists("/icon.png") else "/etc/magno-grid/icon.png"
+if os.path.exists(src):
+    logo = QPixmap(src).scaled(148, 148, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    p.drawPixmap((size - logo.width()) // 2, (size - logo.height()) // 2, logo)
+
+# 4. Draw a sleek circular update badge in the bottom-right corner
+bx, by, br = 192.0, 192.0, 42.0
+p.setPen(QPen(QColor(18, 20, 26), 6))
+p.setBrush(QBrush(QColor(255, 117, 40)))
+p.drawEllipse(QPointF(bx, by), br, br)
+
+# White refresh arc + arrow inside the badge
+arrow_pen = QPen(QColor(255, 255, 255), 6, Qt.SolidLine, Qt.RoundCap)
+p.setPen(arrow_pen)
+p.setBrush(Qt.NoBrush)
+p.drawArc(QRectF(bx - 18, by - 18, 36, 36), 40 * 16, 275 * 16)
+
+# Arrowhead tip
+p.setPen(Qt.NoPen)
+p.setBrush(QBrush(QColor(255, 255, 255)))
+tri = QPolygonF([QPointF(bx + 22, by - 14), QPointF(bx + 8, by - 22), QPointF(bx + 10, by - 6)])
+p.drawPolygon(tri)
+
+p.end()
+os.makedirs("/etc/magno-grid", exist_ok=True)
+out_path = "/etc/magno-grid/updater-icon.png"
+img.save(out_path)
+os.chmod(out_path, 0o644)
+print("Generated custom update icon at:", out_path)
+'
+
+# Point Magno Updater desktop entry & window icon to the new updater-icon.png
+sed -i 's|^Icon=.*|Icon=/etc/magno-grid/updater-icon.png|' ~/.local/share/applications/magno-updater.desktop
+sudo sed -i 's|LOGO = "/icon.png".*|LOGO = "/etc/magno-grid/updater-icon.png"|' /usr/local/bin/magno-updater
+update-desktop-database ~/.local/share/applications/
