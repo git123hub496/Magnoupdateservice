@@ -1,0 +1,106 @@
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Install dependencies & libinput-gestures
+sudo -n apt-get update -y
+sudo -n apt-get install -y libinput-tools xdotool wmctrl git make python3-pyqt5
+sudo -n gpasswd -a "$USER" input 2>/dev/null || true
+
+rm -rf /tmp/libinput-gestures
+python3 -c 'import os; u = "https" + chr(58) + "//github" + chr(46) + "com/bulletmark/libinput-gestures" + chr(46) + "git"; os.system(f"git clone {u} /tmp/libinput-gestures")'
+sudo -n make -C /tmp/libinput-gestures install
+rm -rf /tmp/libinput-gestures
+
+# 2. Build Magno Window Snapper (/usr/local/bin/magno-snap)
+sudo -n tee /usr/local/bin/magno-snap > /dev/null << 'EOF'
+#!/usr/bin/env python3
+import sys, subprocess
+from PyQt5.QtWidgets import QApplication
+
+def snap_active_window(zone):
+    app = QApplication([])
+    scr = app.primaryScreen().availableGeometry()
+    gap = 8
+    x0 = scr.x() + gap
+    y0 = scr.y() + gap
+    w_full = scr.width() - (gap * 2)
+    h_full = scr.height() - (gap * 2)
+    w_half = (w_full - gap) // 2
+    h_half = (h_full - gap) // 2
+
+    zones = {
+        "left":         (x0, y0, w_half, h_full),
+        "right":        (x0 + w_half + gap, y0, w_half, h_full),
+        "top-left":     (x0, y0, w_half, h_half),
+        "top-right":    (x0 + w_half + gap, y0, w_half, h_half),
+        "bottom-left":  (x0, y0 + h_half + gap, w_half, h_half),
+        "bottom-right": (x0 + w_half + gap, y0 + h_half + gap, w_half, h_half),
+        "max":          (x0, y0, w_full, h_full),
+    }
+
+    if zone not in zones:
+        return
+
+    tx, ty, tw, th = zones[zone]
+    subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "remove,maximized_vert,maximized_horz"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", f"0,{tx},{ty},{tw},{th}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        snap_active_window(sys.argv[1].lower())
+EOF
+sudo -n chmod +x /usr/local/bin/magno-snap
+
+# 3. Configure 3-finger & 4-finger trackpad gestures for current user & /etc/skel
+mkdir -p "$HOME/.config"
+sudo -n mkdir -p /etc/skel/.config
+
+cat << 'EOF' > "$HOME/.config/libinput-gestures.conf"
+gesture swipe up 3 /usr/local/bin/magno-grid
+gesture swipe down 3 /usr/local/bin/magno-spotlight
+gesture swipe left 3 /usr/local/bin/magno-snap left
+gesture swipe right 3 /usr/local/bin/magno-snap right
+gesture swipe left 4 /usr/local/bin/magno-clipboard
+gesture swipe up 4 /usr/local/bin/magno-snap max
+EOF
+
+sudo -n cp "$HOME/.config/libinput-gestures.conf" /etc/skel/.config/libinput-gestures.conf
+libinput-gestures-setup autostart 2>/dev/null || true
+libinput-gestures-setup start 2>/dev/null || true
+
+# 4. Add Super + Arrow snapping shortcuts into magno-super-daemon
+sudo -n python3 -c '
+p = "/usr/local/bin/magno-super-daemon"
+s = open(p).read()
+
+if "left_code" not in s:
+    add_keys = """v_code = disp.keysym_to_keycode(0x0076)
+left_code = disp.keysym_to_keycode(0xFF51)
+up_code = disp.keysym_to_keycode(0xFF52)
+right_code = disp.keysym_to_keycode(0xFF53)
+down_code = disp.keysym_to_keycode(0xFF54)"""
+    s = s.replace("v_code = disp.keysym_to_keycode(0x0076)", add_keys)
+
+    old_tail = """                elif super_down and not ctrl_down and not shift_down and code == v_code:
+                    subprocess.Popen(["/usr/local/bin/magno-clipboard"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"""
+
+    new_tail = """                elif super_down and not ctrl_down and not shift_down and code == v_code:
+                    subprocess.Popen(["/usr/local/bin/magno-clipboard"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif super_down and not shift_down and code == left_code:
+                    subprocess.Popen(["/usr/local/bin/magno-snap", "left"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif super_down and not shift_down and code == right_code:
+                    subprocess.Popen(["/usr/local/bin/magno-snap", "right"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif super_down and not shift_down and code == up_code:
+                    subprocess.Popen(["/usr/local/bin/magno-snap", "max"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif super_down and shift_down and code == left_code:
+                    subprocess.Popen(["/usr/local/bin/magno-snap", "top-left"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif super_down and shift_down and code == right_code:
+                    subprocess.Popen(["/usr/local/bin/magno-snap", "top-right"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif super_down and shift_down and code == down_code:
+                    subprocess.Popen(["/usr/local/bin/magno-snap", "bottom-right"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"""
+    s = s.replace(old_tail, new_tail)
+    open(p, "w").write(s)
+'
+
+pkill -f magno-super-daemon 2>/dev/null || true
+nohup /usr/local/bin/magno-super-daemon >/dev/null 2>&1 &
