@@ -1,0 +1,189 @@
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+sudo -n apt-get update -y
+sudo -n apt-get install -y python3-evdev python3-pyqt5
+sudo -n mkdir -p /var/lib/magno-snapshots
+sudo -n chmod 777 /var/lib/magno-snapshots
+
+sudo -n tee /usr/local/bin/magno-boot-keywatch > /dev/null << 'EOF'
+#!/usr/bin/env python3
+import time, select, evdev
+devs = [evdev.InputDevice(p) for p in evdev.list_devices() if evdev.ecodes.KEY_S in evdev.InputDevice(p).capabilities().get(evdev.ecodes.EV_KEY, [])]
+cnt, end = 0, time.time() + 6.5
+while devs and time.time() < end:
+    for d in select.select(devs, [], [], 0.2)[0]:
+        for e in d.read():
+            if e.type == evdev.ecodes.EV_KEY and e.code == evdev.ecodes.KEY_S and e.value == 1:
+                cnt += 1
+                if cnt >= 3:
+                    open("/run/magno-recovery-mode", "w").write("1"); exit(0)
+EOF
+sudo -n chmod +x /usr/local/bin/magno-boot-keywatch
+
+sudo -n tee /etc/systemd/system/magno-boot-keywatch.service > /dev/null << 'EOF'
+[Unit]
+Description=MagnoOS Boot S-Key Trigger
+DefaultDependencies=no
+After=systemd-udev-settle.service
+Before=display-manager.service plymouth-quit.service
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/magno-boot-keywatch
+TimeoutStartSec=8
+[Install]
+WantedBy=sysinit.target
+EOF
+sudo -n systemctl enable magno-boot-keywatch.service 2>/dev/null || true
+sudo -n tee /usr/local/bin/magno-snapshot > /dev/null << 'EOF'
+#!/usr/bin/env python3
+import sys, os, glob, tarfile, shutil, subprocess
+from datetime import datetime
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem, QFrame, QInputDialog
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPainter, QColor, QBrush, QPen, QIcon, QPixmap, QLinearGradient
+
+SNAP_DIR = "/var/lib/magno-snapshots"
+LOGO = "/icon.png" if os.path.exists("/icon.png") else "/etc/magno-grid/icon.png"
+FLAG = "/run/magno-recovery-mode"
+os.makedirs(SNAP_DIR, exist_ok=True)
+TARGETS = ["/usr/local/bin", "/etc/magno-grid", "/usr/share/backgrounds/magnoos", "/usr/share/sounds/MagnoOS", "/usr/share/plymouth/themes/magnoos"]
+
+class MagnoSnapshot(QWidget):
+    def __init__(self, boot=False):
+        super().__init__()
+        self.boot, self.drag = boot, None
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        scr = QApplication.primaryScreen().geometry()
+        self.setGeometry(scr) if boot else self.setGeometry(scr.x()+(scr.width()-520)//2, scr.y()+(scr.height()-460)//2, 520, 460)
+
+        out = QVBoxLayout(self)
+        if boot: out.addStretch(1)
+        box = QFrame()
+        if boot:
+            box.setFixedSize(520, 470)
+            box.setStyleSheet("QFrame { background: rgba(18,20,26,242); border: 1.5px solid #ff914b; border-radius: 24px; }")
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(20, 18, 20, 18)
+
+        hdr = QHBoxLayout()
+        ic = QLabel()
+        if os.path.exists(LOGO): ic.setPixmap(QPixmap(LOGO).scaled(38, 38, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        hdr.addWidget(ic)
+        tl = QLabel("MagnoOS Snapshots\nRecovery Mode" if boot else "MagnoOS Snapshots\n/var/lib/magno-snapshots")
+        tl.setStyleSheet("color: #fff; font-size: 15px; font-weight: bold; border: none; background: transparent;")
+        hdr.addWidget(tl, 1)
+        xb = QPushButton("Boot Desktop" if boot else "×")
+        xb.setStyleSheet("QPushButton { background: rgba(255,255,255,24); color: #fff; border-radius: 14px; padding: 6px 12px; font-weight: bold; } QPushButton:hover { background: #ef4444; }")
+        xb.clicked.connect(self.done)
+        hdr.addWidget(xb)
+        lay.addLayout(hdr)
+
+        self.lst = QListWidget()
+        self.lst.setStyleSheet("QListWidget { background: rgba(255,255,255,14); border-radius: 16px; padding: 6px; color: #fff; } QListWidget::item { background: rgba(255,255,255,18); border-radius: 12px; padding: 10px; margin-bottom: 6px; } QListWidget::item:selected { background: rgba(255,117,40,150); }")
+        lay.addWidget(self.lst, 1)
+
+        self.st = QLabel("Create a snapshot or select one to restore.")
+        self.st.setAlignment(Qt.AlignCenter)
+        self.st.setStyleSheet("color: #ff9e59; font-size: 12px; border: none; background: transparent;")
+        lay.addWidget(self.st)
+
+        row = QHBoxLayout()
+        for txt, fn, col in [("+ New Snapshot", self.make, "qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #ff6a1a,stop:1 #ff9e44); color:#111"), ("Load Snapshot", self.load, "rgba(255,255,255,26); color:#fff"), ("Delete", self.rem, "rgba(239,68,68,70); color:#fca5a5")]:
+            b = QPushButton(txt)
+            b.setFixedHeight(40)
+            b.setStyleSheet(f"QPushButton {{ background: {col}; border-radius: 20px; padding: 0 14px; font-weight: bold; }}")
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        out.addWidget(box, 0, Qt.AlignCenter if boot else Qt.Alignment())
+        if boot: out.addStretch(1)
+        self.reload()
+
+    def reload(self):
+        self.lst.clear()
+        for f in sorted(glob.glob(f"{SNAP_DIR}/*.tar.gz"), reverse=True):
+            it = QListWidgetItem(f"{os.path.basename(f)[:-7]}  ({os.path.getsize(f)/1048576:.1f} MB)")
+            it.setData(Qt.UserRole, f)
+            self.lst.addItem(it)
+
+    def make(self):
+        name, ok = QInputDialog.getText(self, "New Snapshot", "Name:", text=f"MagnoOS_{datetime.now().strftime('%Y-%m-%d_%H-%M')}")
+        if not ok or not name.strip(): return
+        safe = "".join(c for c in name.replace(" ", "_") if c.isalnum() or c in "-_")
+        out = f"{SNAP_DIR}/{safe}.tar.gz"
+        self.st.setText("Saving snapshot..."); QApplication.processEvents()
+        with tarfile.open(out, "w:gz") as t:
+            for p in TARGETS:
+                if os.path.exists(p): t.add(p, arcname=p.lstrip("/"))
+            if os.path.exists(os.path.expanduser("~/.config")): t.add(os.path.expanduser("~/.config"), arcname="user_cfg")
+        os.chmod(out, 0o666)
+        self.st.setText(f"Saved: {safe}"); self.reload()
+
+    def load(self):
+        it = self.lst.currentItem()
+        if not it: return
+        self.st.setText("Loading snapshot..."); QApplication.processEvents()
+        tmp = "/tmp/magno_rst"
+        shutil.rmtree(tmp, ignore_errors=True); os.makedirs(tmp)
+        with tarfile.open(it.data(Qt.UserRole), "r:gz") as t: t.extractall(tmp)
+        for d in ("usr", "etc"):
+            if os.path.exists(f"{tmp}/{d}"): subprocess.run(["sudo", "-n", "cp", "-rf", f"{tmp}/{d}/.", f"/{d}/"])
+        if os.path.exists(f"{tmp}/user_cfg"): subprocess.run(["cp", "-rf", f"{tmp}/user_cfg/.", os.path.expanduser("~/.config/")])
+        shutil.rmtree(tmp, ignore_errors=True)
+        self.st.setText("Snapshot loaded!"); QApplication.processEvents()
+
+    def rem(self):
+        it = self.lst.currentItem()
+        if it: os.remove(it.data(Qt.UserRole)); self.reload()
+
+    def done(self):
+        if os.path.exists(FLAG): subprocess.run(["sudo", "-n", "rm", "-f", FLAG])
+        QApplication.quit()
+
+    def paintEvent(self, e):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        if self.boot: p.fillRect(self.rect(), QColor(8, 10, 14, 245))
+        else:
+            g = QLinearGradient(0, 0, 0, self.height())
+            g.setColorAt(0, QColor(24, 26, 32, 245)); g.setColorAt(1, QColor(14, 15, 19, 250))
+            p.setBrush(QBrush(g)); p.setPen(QPen(QColor(255, 145, 75, 160), 1.5))
+            p.drawRoundedRect(1, 1, self.width()-2, self.height()-2, 24, 24)
+
+    def mousePressEvent(self, e):
+        if not self.boot and e.button() == Qt.LeftButton: self.drag = e.globalPos() - self.frameGeometry().topLeft()
+    def mouseMoveEvent(self, e):
+        if not self.boot and e.buttons() == Qt.LeftButton and self.drag: self.move(e.globalPos() - self.drag)
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape: self.done()
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    if os.path.exists(LOGO): app.setWindowIcon(QIcon(LOGO))
+    w = MagnoSnapshot(boot=os.path.exists(FLAG) or "--boot" in sys.argv)
+    w.show(); w.activateWindow(); sys.exit(app.exec_())
+EOF
+sudo -n chmod +x /usr/local/bin/magno-snapshot
+
+mkdir -p "$HOME/.config/autostart" "$HOME/.local/share/applications"
+cat << 'EOF' > "$HOME/.config/autostart/magno-recovery.desktop"
+[Desktop Entry]
+Type=Application
+Name=MagnoOS Boot Snapshot Check
+Exec=/bin/bash -c '[ -f /run/magno-recovery-mode ] && /usr/local/bin/magno-snapshot --boot'
+X-GNOME-Autostart-enabled=true
+EOF
+
+cat << 'EOF' > "$HOME/.local/share/applications/magno-snapshot.desktop"
+[Desktop Entry]
+Name=Magno Snapshot
+Comment=Create & Load MagnoOS Snapshots
+Exec=/usr/local/bin/magno-snapshot
+Icon=/icon.png
+Terminal=false
+Type=Application
+Categories=System;
+EOF
+sudo -n cp "$HOME/.config/autostart/magno-recovery.desktop" /etc/skel/.config/autostart/ 2>/dev/null || true
+sudo -n cp "$HOME/.local/share/applications/magno-snapshot.desktop" /etc/skel/.local/share/applications/ 2>/dev/null || true
+update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
